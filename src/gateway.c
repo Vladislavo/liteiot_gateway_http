@@ -29,7 +29,7 @@
 #define TIMEDATE_LENGTH			32
 #define PEND_SEND_RETRIES_MAX		5
 #define GATEWAY_PROTOCOL_APP_KEY_SIZE	8
-#define DEVICE_DATA_MAX_LENGTH		256
+#define DEVICE_DATA_MAX_LENGTH		255
 #define GATEWAY_SECURE_KEY_SIZE		16
 #define GATEWAY_ID_SIZE			6
 
@@ -107,6 +107,10 @@ void gateway_protocol_data_send_payload_decode(
 uint8_t gateway_protocol_checkup_callback(gateway_protocol_conf_t *gwp_conf);
 
 static int callback_get_epoch(
+	const struct _u_request *request, 
+	struct _u_response *response,
+	void *user_data);
+static int callback_get_data(
 	const struct _u_request *request, 
 	struct _u_response *response,
 	void *user_data);
@@ -196,6 +200,8 @@ int main (int argc, char **argv) {
 	}
 
 	ulfius_add_endpoint_by_val(&instance, "GET", "/get_epoch", NULL, 0, &callback_get_epoch, NULL);
+	ulfius_add_endpoint_by_val(&instance, "GET", "/data", NULL, 0, &callback_get_data, NULL);
+	ulfius_add_endpoint_by_val(&instance, "POST", "/data", NULL, 0, &callback_post_data, NULL);
 
 	if (ulfius_start_framework(&instance) != U_OK) {
 		fprintf(stderr,"ulfius starting framework failure.\n");
@@ -424,7 +430,6 @@ static int callback_get_epoch(
 	if (gateway_protocol_checkup_callback(&gwp_conf)) {
 		struct timeval tv;
 		gettimeofday(&tv, NULL);
-		printf("epoch : %d\n", (uint32_t)tv.tv_sec);
 		gateway_protocol_packet_encode (
 			&gwp_conf,
 			GATEWAY_PROTOCOL_PACKET_TYPE_TIME_SEND,
@@ -432,7 +437,6 @@ static int callback_get_epoch(
 			&buf_len, buf
 		);
 		base64_encode(buf, buf_len, bufb64);
-		printf("b64 res : %s\n", bufb64);	
 		ulfius_set_string_body_response(response, 200, bufb64);
 	} else {
 		response->status = 404;
@@ -441,11 +445,92 @@ static int callback_get_epoch(
 	return U_CALLBACK_CONTINUE;
 }
 
+static int callback_get_data(
+	const struct _u_request *request, 
+	struct _u_response *response,
+	void *user_data)
+{
+	gateway_protocol_conf_t gwp_conf;
+	uint8_t payload[DEVICE_DATA_MAX_LENGTH];
+	uint8_t payload_length = 0;
+	uint8_t packet[DEVICE_DATA_MAX_LENGTH];
+	uint8_t packet_length = 0;
+	PGresult *res;
+	
+	memcpy(gwp_conf.app_key, u_map_get(request->map_header, "X-Auth-Token"), GATEWAY_PROTOCOL_APP_KEY_SIZE);
+	gwp_conf.app_key[GATEWAY_PROTOCOL_APP_KEY_SIZE] = '\0';
+	// never repeat that!
+	gwp_conf.dev_id = atoi(&u_map_get(request->map_header, "X-Auth-Token")[GATEWAY_PROTOCOL_APP_KEY_SIZE+1]);
+
+	if (gateway_protocol_checkup_callback(&gwp_conf)) {
+		char db_query[200];
+		snprintf(db_query, sizeof(db_query),
+			 "SELECT * FROM pend_msgs WHERE app_key = '%s' AND dev_id = %d AND ack = False", 
+			(char *)gwp_conf.app_key, gwp_conf.dev_id
+		);
+		pthread_mutex_lock(&mutex);
+		res = PQexec(conn, db_query);
+		pthread_mutex_unlock(&mutex);
+		
+		if (PQresultStatus(res) == PGRES_TUPLES_OK && PQntuples(res)) {
+			// there is something for you
+			char msg_cont[150];
+			strncpy(msg_cont, PQgetvalue(res, 0, 2), sizeof(msg_cont));
+			printf("PEND_SEND prepared : %s\n", msg_cont);
+			PQclear(res);
+		
+			base64_decode(msg_cont, strlen(msg_cont)-1, payload);
+			payload_length = BASE64_DECODE_OUT_SIZE(strlen(msg_cont));
+			printf("prepared to send %d bytes : %s\n", payload_length, payload);
+			
+			// send the msg until ack is received
+			gateway_protocol_packet_encode(
+				&gwp_conf,
+				GATEWAY_PROTOCOL_PACKET_TYPE_PEND_SEND,
+				payload_length, payload,
+				&packet_length, packet
+			);
+
+			base64_encode((unsigned char *)packet, packet_length, (char *)payload);
+			snprintf((char *)packet, DEVICE_DATA_MAX_LENGTH, "d=%s", (char *)payload);
+			ulfius_set_string_body_response(response, 200, (char *)packet);
+		} else {
+			// nothing for this device
+			response->status = 404;
+		}
+	} else {
+		// not authorized
+		response->status = 401;
+	}
+
+	return U_CALLBACK_CONTINUE;
+}
+
 static int callback_post_data(
 	const struct _u_request *request, 
 	struct _u_response *response,
 	void *user_data)
 {
+	gcom_ch_request_t *req = (gcom_ch_request_t *)malloc(sizeof(gcom_ch_request_t));
+	uint16_t b64dlen = strlen(u_map_get(request->map_post_body, "d"));
+	uint16_t dlen = BASE64_DECODE_OUT_SIZE(strlen(u_map_get(request->map_post_body, "d")));
+	req->packet_length = dlen > DEVICE_DATA_MAX_LENGTH? DEVICE_DATA_MAX_LENGTH : dlen;
+	
+	memcpy(req->gch.gwp_conf.app_key, u_map_get(request->map_header, "X-Auth-Token"), GATEWAY_PROTOCOL_APP_KEY_SIZE);
+	req->gch.gwp_conf.app_key[GATEWAY_PROTOCOL_APP_KEY_SIZE] = '\0';
+	// never repeat that!
+	req->gch.gwp_conf.dev_id = atoi(&u_map_get(request->map_header, "X-Auth-Token")[GATEWAY_PROTOCOL_APP_KEY_SIZE+1]);
+	
+	// add assert for packet length
+	// will crash when dlen > DEVICE_DATA_MAX_LENGTH
+	base64_decode(u_map_get(request->map_post_body, "d"), b64dlen, req->packet);
+	if (task_queue_enqueue(tq, process_packet, req) > 0) {
+		response->status = 201;
+	} else {
+		response->status = 404;
+	}
+
+	// TODO: check for PEND data
 
 	return U_CALLBACK_CONTINUE;
 }
