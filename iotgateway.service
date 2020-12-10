@@ -1,0 +1,13 @@
+[Unit]
+Description=HPC&A IoT Gateway
+
+[Service]
+User=vlad
+Type=simple
+ExecStart=/home/vlad/thso.gateway/bin/gateway 1>/dev/null
+WorkingDirectory=/home/vlad/thso.gateway
+Restart=on-failure
+KillSignal=SIGKILL
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,15 @@
+[submodule "lib/gateway_protocol"]
+	path = lib/gateway_protocol
+	url = http://lorca.act.uji.es/gitlab/vrykov/thso.gateway_protocol.git
+[submodule "lib/base64"]
+	path = lib/base64
+	url = https://github.com/zhicheng/base64.git
+[submodule "json-parser"]
+	path = lib/json-parser
+	url = https://github.com/udp/json-parser
+[submodule "tiny-AES-c"]
+	path = lib/tiny-AES-c
+	url = https://github.com/kokke/tiny-AES-c.git
+[submodule "gateway/lib/paho.mqtt.c"]
+	path = gateway/lib/paho.mqtt.c
+	url = http://github.com/eclipse/paho.mqtt.c.git
